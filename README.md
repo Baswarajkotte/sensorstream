@@ -9,7 +9,7 @@ A backend for IoT sensor data. Devices push batches of readings over a REST API,
 raise alerts as data arrives, and a pandas analytics layer serves bucketed statistics, rolling
 z-score anomaly detection and CSV exports. A small dashboard shows it all in the browser.
 
-![Dashboard](docs/dashboard.jpg)
+![Demo: simulator loads 24 h of data, then the dashboard shows stats, anomalies and alerts](docs/demo.gif)
 
 ## Features
 
