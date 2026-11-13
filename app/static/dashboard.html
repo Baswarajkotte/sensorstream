@@ -1,0 +1,112 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>SensorStream Dashboard</title>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
+  <style>
+    :root { --bg:#f6f7f9; --card:#fff; --text:#1d2433; --muted:#667085; --accent:#2563eb; --bad:#dc2626; --line:#e4e7ec; }
+    * { box-sizing: border-box; }
+    body { margin:0; font-family: system-ui, -apple-system, "Segoe UI", sans-serif; background:var(--bg); color:var(--text); }
+    header { padding:16px 24px; background:var(--card); border-bottom:1px solid var(--line); display:flex; gap:12px; align-items:center; flex-wrap:wrap; }
+    h1 { font-size:18px; margin:0 auto 0 0; }
+    main { padding:24px; display:grid; gap:16px; grid-template-columns: 2fr 1fr; }
+    @media (max-width: 900px) { main { grid-template-columns: 1fr; } }
+    .card { background:var(--card); border:1px solid var(--line); border-radius:10px; padding:16px; }
+    .card h2 { font-size:14px; margin:0 0 12px; color:var(--muted); text-transform:uppercase; letter-spacing:.04em; }
+    select, input, button { font:inherit; padding:6px 10px; border:1px solid var(--line); border-radius:6px; background:#fff; }
+    button { background:var(--accent); color:#fff; border-color:var(--accent); cursor:pointer; }
+    table { width:100%; border-collapse:collapse; font-size:13px; }
+    td, th { padding:6px 4px; border-bottom:1px solid var(--line); text-align:left; }
+    .bad { color:var(--bad); font-weight:600; }
+    .muted { color:var(--muted); font-size:13px; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>SensorStream</h1>
+    <input id="key" type="password" placeholder="Admin API key" aria-label="Admin API key">
+    <select id="device" aria-label="Device"></select>
+    <select id="metric" aria-label="Metric"></select>
+    <select id="bucket" aria-label="Bucket">
+      <option>1min</option><option>5min</option><option selected>15min</option><option>1h</option><option>1d</option>
+    </select>
+    <button id="load">Load</button>
+  </header>
+  <main>
+    <section class="card">
+      <h2>Mean / min / max per bucket</h2>
+      <canvas id="chart" height="140"></canvas>
+      <p id="status" class="muted"></p>
+    </section>
+    <section class="card">
+      <h2>Anomalies (rolling z-score)</h2>
+      <table><thead><tr><th>Time</th><th>Value</th><th>z</th></tr></thead><tbody id="anomalies"></tbody></table>
+      <h2 style="margin-top:20px">Recent alerts</h2>
+      <table><thead><tr><th>Time</th><th>Metric</th><th>Value</th></tr></thead><tbody id="alerts"></tbody></table>
+    </section>
+  </main>
+  <script>
+    const $ = (id) => document.getElementById(id);
+    let chart;
+    try { $("key").value = sessionStorage.getItem("ss-key") || ""; } catch (e) {}
+
+    async function api(path) {
+      const res = await fetch(path, { headers: { "X-API-Key": $("key").value } });
+      if (!res.ok) throw new Error(`${res.status} ${await res.text()}`);
+      return res.json();
+    }
+    function fill(select, items, label = (x) => x, value = (x) => x) {
+      const current = select.value;
+      select.innerHTML = items.map((x) => `<option value="${value(x)}">${label(x)}</option>`).join("");
+      if ([...select.options].some((o) => o.value === current)) select.value = current;
+    }
+    const fmt = (ts) => new Date(ts.endsWith("Z") || ts.includes("+") ? ts : ts + "Z").toLocaleString();
+
+    async function loadDevices() {
+      try { sessionStorage.setItem("ss-key", $("key").value); } catch (e) {}
+      const devices = await api("/devices");
+      fill($("device"), devices, (d) => d.name, (d) => d.id);
+      await loadMetrics();
+    }
+    async function loadMetrics() {
+      if (!$("device").value) return;
+      fill($("metric"), await api(`/devices/${$("device").value}/metrics`));
+    }
+    async function load() {
+      try {
+        if (!$("device").options.length) await loadDevices();
+        const d = $("device").value, m = $("metric").value;
+        if (!d || !m) { $("status").textContent = "No readings yet. Run scripts/simulate.py."; return; }
+        const [stats, anomalies, alerts] = await Promise.all([
+          api(`/devices/${d}/stats?metric=${m}&bucket=${$("bucket").value}&hours=24`),
+          api(`/devices/${d}/anomalies?metric=${m}&hours=24`),
+          api(`/alerts?device_id=${d}&limit=10`),
+        ]);
+        const labels = stats.points.map((p) => fmt(p.bucket));
+        const ds = (label, key, color) => ({ label, data: stats.points.map((p) => p[key]), borderColor: color, pointRadius: 0, tension: .25 });
+        chart?.destroy();
+        chart = new Chart($("chart"), {
+          type: "line",
+          data: { labels, datasets: [ds("mean", "mean", "#2563eb"), ds("min", "min", "#94a3b8"), ds("max", "max", "#f59e0b")] },
+          options: { interaction: { mode: "index", intersect: false }, scales: { x: { ticks: { maxTicksLimit: 8 } } } },
+        });
+        $("status").textContent = `${stats.points.reduce((a, p) => a + p.count, 0)} readings in the last 24 h`;
+        $("anomalies").innerHTML = anomalies.anomalies.slice(-10).reverse()
+          .map((a) => `<tr><td>${fmt(a.ts)}</td><td class="bad">${a.value}</td><td>${a.z_score}</td></tr>`).join("")
+          || `<tr><td colspan="3" class="muted">None found</td></tr>`;
+        $("alerts").innerHTML = alerts
+          .map((a) => `<tr><td>${fmt(a.ts)}</td><td>${a.metric}</td><td class="bad">${a.value}</td></tr>`).join("")
+          || `<tr><td colspan="3" class="muted">No alerts</td></tr>`;
+      } catch (err) {
+        $("status").textContent = `Could not load data: ${err.message}`;
+      }
+    }
+    $("load").addEventListener("click", () => loadDevices().then(load).catch((e) => $("status").textContent = e.message));
+    $("device").addEventListener("change", () => loadMetrics().then(load));
+    $("metric").addEventListener("change", load);
+    $("bucket").addEventListener("change", load);
+  </script>
+</body>
+</html>

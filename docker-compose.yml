@@ -1,0 +1,27 @@
+services:
+  api:
+    build: .
+    ports:
+      - "8000:8000"
+    environment:
+      DATABASE_URL: postgresql+psycopg2://sensor:sensor@db:5432/sensorstream
+      ADMIN_API_KEY: ${ADMIN_API_KEY:-dev-admin-key}
+    depends_on:
+      db:
+        condition: service_healthy
+
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: sensor
+      POSTGRES_PASSWORD: sensor
+      POSTGRES_DB: sensorstream
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U sensor"]
+      interval: 5s
+      retries: 10
+
+volumes:
+  pgdata:
